@@ -4,10 +4,11 @@ import csv
 import numpy as np
 from keras.preprocessing import image
 from keras import optimizers
+from sklearn.utils import class_weight
 
 WIDTH = 320
 HEIGHT = 320
-num_classes = 4
+num_classes = 3
 
 
 def read_data(filepath):
@@ -48,18 +49,32 @@ column_names, train_data = read_data(train_csv_path)
 validate_csv_path = '/floyd/input/chexpert/valid.csv'
 _, validate_data = read_data(validate_csv_path)
 
+def preprocess_y(y):
+	new_y = np.copy(y)
+	new_y[new_y == ''] = 0
+	new_y = new_y.astype(float)
+	new_y = new_y.astype(int)
+	new_y[new_y == -1] = 2
+	return new_y
 
-def preprocess_y(raw_y):
-	raw_y[raw_y == ''] = -2
-	raw_y = raw_y.astype(float)
-	y = raw_y.astype(int)
-	return y
 
+def preprocess_y_ones(y):
+	new_y = np.copy(y)
+	new_y[new_y == ''] = 0
+	new_y = new_y.astype(float)
+	new_y = new_y.astype(int)
+	new_y[new_y == -1] = 1
+	return new_y
 
-# cardiomegaly train and output
-y_train = preprocess_y(train_data[:, 7])
-y_validate = preprocess_y(validate_data[:, 7])
+# Atelectasis train and output
+y_train = preprocess_y_ones(train_data[:, 13])
+y_validate = preprocess_y_ones(validate_data[:, 13])
 
+# balance the class weights for underrepresented class
+# class_weights = class_weight.compute_class_weight('balanced', np.unique(y_train), y_train)
+# class_weights = np.roll(class_weights, 2)
+
+# class_weights_dict = {x: y for x, y in zip(range(0, 3), class_weights)}
 
 # Referencing the following blog to generate the data
 # https://stanford.edu/~shervine/blog/keras-how-to-generate-data-on-the-fly
@@ -106,7 +121,7 @@ class DataGenerator(keras.utils.Sequence):
 	def on_epoch_end(self):
 		'Updates indexes after each epoch'
 		self.indexes = np.arange(len(self.list_IDs))
-		if self.shuffle == False:
+		if self.shuffle == True:
 			np.random.shuffle(self.indexes)
 
 	def __data_generation(self, list_IDs_temp):
@@ -122,7 +137,7 @@ class DataGenerator(keras.utils.Sequence):
 
 			img_path = os.path.join(cur_dir, ID)
 			img_path = img_path.replace('home/CheXpert-v1.0-small', 'input/chexpert')
-			img = image.load_img(img_path, target_size=(WIDTH, HEIGHT), color_mode='grayscale')
+			img = image.load_img(img_path, target_size=(WIDTH, HEIGHT), grayscale=True)
 
 			X[i,] = image.img_to_array(img) / 255
 
@@ -130,7 +145,6 @@ class DataGenerator(keras.utils.Sequence):
 			y[i] = self.labels[ID]
 
 		return X, keras.utils.to_categorical(y, num_classes=self.n_classes)
-
 
 
 def get_train_and_validation(train_ids, y_train, validation_ids, y_validation):
@@ -154,7 +168,7 @@ partition, labels = get_train_and_validation(train_data[:, 0], y_train, validate
 params = {
     'dim': (320, 320),
     'batch_size': 16,
-    'n_classes': 4,
+    'n_classes': 2,
     'n_channels': 1,
     'shuffle': True
 }
@@ -163,13 +177,6 @@ training_generator = DataGenerator(partition['train'], labels, **params)
 validation_generator = DataGenerator(partition['validation'], labels, **params)
 
 
-model = keras.applications.densenet.DenseNet121(
-                                        include_top=True,
-                                        weights=None,
-                                        input_shape=(320, 320, 1),
-                                        pooling='max',
-                                        classes=4)
-
 callbacks_list = [
     keras.callbacks.EarlyStopping(
         monitor='acc',
@@ -177,22 +184,32 @@ callbacks_list = [
     ),
     keras.callbacks.ModelCheckpoint(
         filepath='chexpert_weights.h5',
-        monitor='val_loss',
+        monitor='val_acc',
         save_best_only=True,
     )
 ]
 
-optimizer = optimizers.Adam(lr=0.1, beta_1=0.9, beta_2=0.999, epsilon=1e-08)
+
+model = keras.applications.densenet.DenseNet121(
+                                        include_top=True,
+                                        weights=None,
+                                        input_shape=(320, 320, 1),
+                                        pooling='max',
+                                        classes=2)
+
+optimizer = optimizers.Adam(lr=1e-4, beta_1=0.9, beta_2=0.999, epsilon=1e-08)
 
 model.compile(loss='categorical_crossentropy',
 			  optimizer=optimizer,
 			  metrics=["accuracy"])
 
 model.fit_generator(
-	train_generator,
+	training_generator,
 	steps_per_epoch=13963,
-	callbacks=callbacks_list,
 	epochs=10,
+	callbacks=callbacks_list,
 	validation_data=validation_generator,
-	validation_steps=14
+	validation_steps=14,
 )
+
+# class_weight=class_weights_dict
